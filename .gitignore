@@ -1,0 +1,11 @@
+.history
+.vscode/
+*.o
+*.obj
+*.so
+*.a
+*.dll
+*.lib
+*.exe
+*.out
+*.dylib
