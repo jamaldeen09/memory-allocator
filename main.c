@@ -52,7 +52,6 @@
 // NOTE: A "Block" dosen't mean the actual block of memory in the explanation. 
 // a block means a header (which contains metadata) + bytes requested.
 
-#include <stdio.h>
 #include <stdlib.h>
 #include <stdbool.h>
 #include <unistd.h>
@@ -78,6 +77,7 @@ typedef struct GateKeeper{
 
 gatekeeper *create_gatekeeper(void *heap_start_address);
 void *allocate_memory(gatekeeper *gatekeeper_address, int size);
+void free_memory(void *first_memory_block_address);
 
 int main (void){
     void *raw_memory_address = sbrk(SINGLE_PAGE);
@@ -91,6 +91,7 @@ int main (void){
 
     int *requested_memory_start_address = allocate_memory(gate_keeper, sizeof(int));
     *requested_memory_start_address = 60;
+    free_memory(requested_memory_start_address);
     return 0;
 }
 
@@ -98,11 +99,10 @@ gatekeeper *create_gatekeeper(void *heap_start_address){
     gatekeeper *gate_keeper = (gatekeeper *)heap_start_address;
 
     if (gate_keeper->marker != GATEKEEPER_MARKER){
-        // Initialize the gatekeeper
+
         gate_keeper->marker = GATEKEEPER_MARKER;
         gate_keeper->lock = false;
 
-        // Initialize the initial node next to the gatekeeper
         node *initial_node_address = (node *)(gate_keeper + 1);;
         initial_node_address->in_use = false;
         initial_node_address->marker = NODE_MARKER;
@@ -112,7 +112,6 @@ gatekeeper *create_gatekeeper(void *heap_start_address){
         uint8_t total_used_bytes = sizeof(gatekeeper) + sizeof(node);
         initial_node_address->length = SINGLE_PAGE - total_used_bytes;
 
-        // Initialize the start node on the gatekeeper
         gate_keeper->start_node = initial_node_address;
         return gate_keeper;
     }
@@ -126,23 +125,68 @@ void *allocate_memory(gatekeeper *gatekeeper_address, int size){
     node *start_node_address = gatekeeper_address->start_node;
     node *curr_node_address = start_node_address;
 
-    while(curr_node_address->in_use){
+    while(curr_node_address != NULL && (curr_node_address->in_use || curr_node_address->length < size)){
         curr_node_address = curr_node_address->next_node;
     }
 
-    int temp_size = curr_node_address->length;
-    curr_node_address->length = size;
+    if (curr_node_address == NULL) {
+        gatekeeper_address->lock = false;
+
+        void *new_raw_memory_address = sbrk(SINGLE_PAGE);
+        if (new_raw_memory_address == (void*)-1) return NULL;
+
+        node *last_existing_node_address = start_node_address;
+
+        while(last_existing_node_address->next_node != NULL){
+            last_existing_node_address  = last_existing_node_address->next_node;
+        };
+
+        node *new_node = (node *)new_raw_memory_address;
+        new_node->in_use = false;
+        new_node->marker = NODE_MARKER;
+        new_node->next_node = NULL;
+        new_node->prev_node = last_existing_node_address;
+        new_node->length = SINGLE_PAGE - sizeof(node);
+
+        last_existing_node_address->next_node = new_node;
+        return allocate_memory(gatekeeper_address, size);
+    };
+
     curr_node_address->in_use = true;
 
-    node *new_node = ((node *)((char *)curr_node_address + sizeof(node) + size));
-    new_node->in_use = false;
-    new_node->marker = NODE_MARKER;
-    new_node->next_node = NULL;
-    new_node->prev_node = curr_node_address;
-    new_node->length = temp_size - size;
+    if (curr_node_address->next_node == NULL){
+        node *new_node = (node *) ((char *)curr_node_address + sizeof(node) + size);
+        new_node->in_use = false;
+        new_node->marker = NODE_MARKER;
+        new_node->next_node = NULL;
+        new_node->prev_node = curr_node_address;
+        new_node->length = curr_node_address->length - size;
 
-    curr_node_address->next_node = new_node;
+        curr_node_address->length = size;
+        curr_node_address->next_node = new_node;
+    }
+
+    else {
+        int leftover_space = curr_node_address->length - size;
+        curr_node_address->length = size;
+    
+        if (leftover_space > sizeof(node)){
+            node *new_node = (node *)((char *)curr_node_address + sizeof(node) + size);
+            new_node->marker = NODE_MARKER;
+            new_node->in_use = false;
+            new_node->next_node = curr_node_address->next_node;
+            new_node->prev_node = curr_node_address;
+            new_node->length = leftover_space;
+    
+            curr_node_address->next_node = new_node;
+        }
+    }
 
     gatekeeper_address->lock = false;
     return curr_node_address + 1;
+}
+
+void free_memory(void *first_memory_block_address){
+    node *owner_node_address = (node *) first_memory_block_address - 1;
+    if (owner_node_address->marker == NODE_MARKER) owner_node_address->in_use = false;
 }
